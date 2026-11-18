@@ -1,0 +1,83 @@
+name: build-preview
+
+# The manuscript lives in a private repo. GitHub will not serve Pages from a
+# private repo on a free plan, so the preview is a second, public repo that
+# carries the built site and nothing else.
+#
+# This workflow runs in the preview repo and checks out the manuscript from
+# the private one using a read-only deploy key. It builds the site with the
+# same script the author runs locally — there is no second copy of the
+# pipeline and no second copy of the manuscript.
+#
+# The push to gh-pages uses a separate write-only deploy key, so the key that
+# can read the manuscript cannot write to the site, and the key that can
+# write the site cannot read the manuscript.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Rebuild weekly, so a draft copy stays in step with the manuscript.
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out the manuscript
+        uses: actions/checkout@v4
+        with:
+          repository: lastknownvoice/conversation-is-the-control-layer
+          ref: main
+          path: manuscript
+          ssh-key: ${{ secrets.MANUSCRIPT_SSH_KEY }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install mkdocs-material==9.8.1
+
+      - name: Build the preview
+        env:
+          MKDOCS_BIN: mkdocs
+        working-directory: manuscript
+        run: python3 scripts/build-site.py --preview
+
+      - name: Strip the symlink farm from the build output
+        # build-site.py makes docs/ a farm of symlinks pointing at the
+        # Markdown in the repo root. MkDocs copies them into the output as
+        # symlinks, and Pages' artifact upload then chokes on the dangling
+        # links ("File removed before we read it"), failing the deployment.
+        # They serve no purpose in the built site — the Markdown has already
+        # been rendered to HTML.
+        run: |
+          cd manuscript
+          find site-preview -type l -delete
+          # .nojekyll stops Pages running the output through Jekyll, which
+          # would otherwise strip directories it thinks are special.
+          touch site-preview/.nojekyll
+          echo "remaining symlinks: $(find site-preview -type l | wc -l)"
+          echo "index.html at root: $([ -f site-preview/index.html ] && echo yes || echo NO)"
+
+      - uses: actions/configure-pages@v5
+        id: pages
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: manuscript/site-preview
+
+      - id: deployment
+        uses: actions/deploy-pages@v4
